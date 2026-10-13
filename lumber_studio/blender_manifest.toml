@@ -1,0 +1,14 @@
+schema_version = "1.0.0"
+
+id = "lumber_studio"
+version = "0.7.9"
+name = "Lumber Studio"
+tagline = "Spline-style minimal workspaces for Blender"
+maintainer = "Daniel Lefcourt <daniellefcourt@gmail.com>"
+type = "add-on"
+
+tags = ["3D View", "User Interface"]
+
+blender_version_min = "4.5.0"
+
+license = ["SPDX:GPL-3.0-or-later"]
