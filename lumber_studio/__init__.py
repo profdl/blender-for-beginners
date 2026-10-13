@@ -90,7 +90,7 @@ PROFILES = {
         ],
     },
     # Mirrors Spline's default toolbar: select, frame, 2D shapes, 3D objects,
-    # text, pen, image, comment | play.
+    # text, pen, image | play. (Annotate/comments are out of scope for prints.)
     "general": {
         "anchor": "left-top",
         "items": [
@@ -102,13 +102,11 @@ PROFILES = {
             ("add", "TEXT", "FONT_DATA", ()),
             ("op", "lumberstudio.pen", "CURVE_BEZCURVE", ("builtin.draw",)),
             ("op", "lumberstudio.add_image", "IMAGE_DATA", ()),
-            ("tool", "builtin.annotate", "GREASEPENCIL",
-             ("builtin.annotate", "builtin.annotate_line", "builtin.annotate_polygon", "builtin.annotate_eraser")),
             None,
             ("op", "lumberstudio.preview_toggle", "PLAY", ()),
         ],
     },
-    # studioEdit: same pill, edit tools. kind "selmode" toggles vertex/edge/face.
+    # Editing inside Studio: same pill, edit tools. kind "selmode" toggles vertex/edge/face.
     "edit_mesh": {
         "anchor": "left-top",
         "items": [
@@ -151,6 +149,109 @@ PROFILES = {
     },
 }
 SELMODE_INDEX = {"VERT": 0, "EDGE": 1, "FACE": 2}
+
+# Tooltip for each toolbar button: (name, key), shown as "Name  Key" like Figma.
+# Keys are the ones that work today; update this table when the keymap changes.
+BUTTON_HINTS = {
+    "builtin.select_box": ("Select", "V"),
+    "builtin.move": ("Move", "G"),
+    "builtin.rotate": ("Rotate", "R"),
+    "builtin.scale": ("Scale", "S"),
+    "builtin.extrude_region": ("Extrude", "E"),
+    "builtin.inset_faces": ("Inset", "I"),
+    "builtin.bevel": ("Bevel", "Ctrl+B"),
+    "builtin.loop_cut": ("Loop Cut", "Ctrl+R"),
+    "builtin.pen": ("Pen", ""),
+    "builtin.draw": ("Draw", ""),
+    "builtin.extrude": ("Extrude", "E"),
+    "VERT": ("Points", "1"),
+    "EDGE": ("Edges", "2"),
+    "FACE": ("Faces", "3"),
+    "view3d.view_selected": ("Frame Selection", "Numpad ."),
+    "LUMBERSTUDIO_PT_add_shape": ("Shapes", "R rectangle · O ellipse"),
+    "LUMBERSTUDIO_PT_add_object": ("3D Objects", ""),
+    "TEXT": ("Text", "T"),
+    "lumberstudio.pen": ("Pen", "P"),
+    "lumberstudio.add_image": ("Image", ""),
+    "lumberstudio.preview_toggle": ("Preview", ""),
+    "lumberstudio.edit_done": ("Done Editing", "Esc"),
+    "lumber.add_board": ("Add 2x4", ""),
+    "lumber.add_supports": ("Add Supports", ""),
+    "lumber.fit_to_plate": ("Fit to Plate", ""),
+    "lumber.export": ("Export Print", ""),
+}
+
+
+def _button_tooltip(target):
+    name, key = BUTTON_HINTS.get(target, ("", ""))
+    if not name:
+        return ""
+    return f"{name}  ({key})" if key else name
+
+
+def _op_exists(path):
+    mod, _, name = path.partition(".")
+    try:
+        getattr(getattr(bpy.ops, mod), name).get_rna_type()
+        return True
+    except Exception:
+        return False
+
+
+class LUMBERSTUDIO_OT_button(bpy.types.Operator):
+    """A toolbar button. It exists so each button can show its own name and key"""
+    bl_idname = "lumberstudio.button"
+    bl_label = "Studio Button"
+    bl_options = {'INTERNAL'}
+
+    kind: bpy.props.StringProperty(options={'SKIP_SAVE'})
+    target: bpy.props.StringProperty(options={'SKIP_SAVE'})
+
+    @classmethod
+    def description(cls, context, props):
+        return _button_tooltip(props.target) or props.target
+
+    def invoke(self, context, event):
+        return self.execute(context)
+
+    def execute(self, context):
+        kind, target = self.kind, self.target
+        try:
+            if kind == "tool":
+                bpy.ops.wm.tool_set_by_id(name=target)
+            elif kind == "menu":
+                bpy.ops.wm.call_menu(name=target)
+            elif kind == "panel":
+                bpy.ops.wm.call_panel(name=target, keep_open=False)
+            elif kind == "add":
+                bpy.ops.lumberstudio.add(kind=target)
+            elif kind == "selmode":
+                bpy.ops.mesh.select_mode(type=target, use_extend=False, use_expand=False)
+            else:
+                mod, _, name = target.partition(".")
+                op = getattr(getattr(bpy.ops, mod), name)
+                if not op.poll():
+                    return {'CANCELLED'}
+                op('INVOKE_DEFAULT')
+        except Exception as e:
+            self.report({'WARNING'}, str(e))
+            return {'CANCELLED'}
+        return {'FINISHED'}
+
+
+class LUMBERSTUDIO_OT_button_undo(LUMBERSTUDIO_OT_button):
+    """A toolbar button that changes the scene, so it records one undo step"""
+    bl_idname = "lumberstudio.button_undo"
+    bl_label = "Studio Button"
+    bl_options = {'INTERNAL', 'UNDO'}
+
+    # Declared again: Blender reads properties from each class's own annotations.
+    kind: bpy.props.StringProperty(options={'SKIP_SAVE'})
+    target: bpy.props.StringProperty(options={'SKIP_SAVE'})
+
+
+# Buttons that only switch the active tool or open a palette leave no undo step.
+_NO_UNDO_KINDS = {"tool", "menu", "panel"}
 
 PILL = (0.165, 0.165, 0.165, 0.97)
 ACTIVE = (0.33, 0.33, 0.33)
@@ -231,29 +332,18 @@ class LUMBERSTUDIO_GGT_toolbar(bpy.types.GizmoGroup):
             gz.alpha = 1.0
             gz.color_highlight = HOVER
             gz.alpha_highlight = 1.0
-            try:
-                if kind == "tool":
-                    props = gz.target_set_operator("wm.tool_set_by_id")
-                    props.name = target
-                elif kind == "menu":
-                    props = gz.target_set_operator("wm.call_menu")
-                    props.name = target
-                elif kind == "panel":
-                    props = gz.target_set_operator("wm.call_panel")
-                    props.name = target
-                    props.keep_open = False
-                elif kind == "add":
-                    props = gz.target_set_operator("lumberstudio.add")
-                    props.kind = target
-                elif kind == "selmode":
-                    props = gz.target_set_operator("mesh.select_mode")
-                    props.type = target
-                    props.use_extend = False
-                    props.use_expand = False
-                else:
-                    gz.target_set_operator(target)
-            except Exception:
+            if kind == "op" and not _op_exists(target):
                 gz.hide = True  # operator missing (e.g. Lumber disabled)
+            else:
+                # Every button runs through a Studio wrapper so its tooltip reads
+                # "Name  (Key)" instead of a generic Blender description.
+                wrapper = "lumberstudio.button" if kind in _NO_UNDO_KINDS else "lumberstudio.button_undo"
+                try:
+                    props = gz.target_set_operator(wrapper)
+                    props.kind = kind
+                    props.target = target
+                except Exception:
+                    gz.hide = True
             active_ids = set(extra) | ({target} if kind == "tool" else set())
             self.buttons.append((gz, kind, target, active_ids))
 
@@ -1176,10 +1266,13 @@ class LUMBERSTUDIO_PT_design(_StudioPanel, bpy.types.Panel):
         layout.separator()
         _xyz_row(layout, "Position", obj, "location")
         _xyz_row(layout, "Rotation", obj, "rotation_euler")
-        _xyz_row(layout, "Scale", obj, "scale")
-        if obj.type in {'MESH', 'CURVE', 'FONT', 'SURFACE', 'META'}:
+        if obj.type not in SIZED_TYPES:
+            # Lights, cameras and empties have no real size, so Scale stays for them
+            _xyz_row(layout, "Scale", obj, "scale")
+        if obj.type in SIZED_TYPES:
+            # Size in mm replaces Scale: students think in real measurements
             split = layout.split(factor=0.24)
-            split.label(text="Size mm")
+            split.label(text="Size (mm)")
             row = split.row(align=True)
             for i in range(3):
                 row.prop(context.window_manager, "lumberstudio_size_mm", index=i, text="")
@@ -1344,11 +1437,36 @@ def _unpatch_outliner():
 
 
 # ---------------------------------------------------------------------------
-# studioEdit: Spline-style editing of a layer's points, edges and faces.
-# Studio switches to it while in Edit Mode; the studioEdit tab opens straight in.
+# Editing in place: Spline-style editing of a layer's points, edges and faces
+# happens inside Studio itself, the way Figma, Spline and Tinkercad do it.
+# Studio's toolbar and right panel switch to edit tools while in Edit Mode.
+# (The separate studioEdit tab is retired; old files still work if they have it.)
 # ---------------------------------------------------------------------------
 
 EDITABLE_TYPES = {'MESH', 'CURVE'}
+SIZED_TYPES = {'MESH', 'CURVE', 'FONT', 'SURFACE', 'META'}
+_EDIT_FROM_PREVIEW = "studio_edit_from_preview"
+
+
+def _leave_preview_for_edit(context):
+    """Editing needs the editing overlays: step out of Preview and remember to go back."""
+    space = context.space_data if context.space_data and context.space_data.type == 'VIEW_3D' \
+        else _studio_view3d(context)
+    if space is None or space.shading.type != 'MATERIAL':
+        return
+    space.id_data[_EDIT_FROM_PREVIEW] = True
+    _apply_preview(space, False, context.scene.lumberstudio_preview_floor)
+
+
+def _return_to_preview_after_edit(context):
+    space = context.space_data if context.space_data and context.space_data.type == 'VIEW_3D' \
+        else _studio_view3d(context)
+    if space is None:
+        return
+    scr = space.id_data
+    if scr.get(_EDIT_FROM_PREVIEW):
+        del scr[_EDIT_FROM_PREVIEW]
+        _apply_preview(space, True, context.scene.lumberstudio_preview_floor)
 
 
 class LUMBERSTUDIO_OT_edit_enter(bpy.types.Operator):
@@ -1364,6 +1482,7 @@ class LUMBERSTUDIO_OT_edit_enter(bpy.types.Operator):
                 and obj is not None and obj.type in EDITABLE_TYPES and obj.select_get())
 
     def execute(self, context):
+        _leave_preview_for_edit(context)
         bpy.ops.object.mode_set(mode='EDIT')
         try:
             bpy.ops.wm.tool_set_by_id(name="builtin.select_box")
@@ -1384,8 +1503,9 @@ class LUMBERSTUDIO_OT_edit_done(bpy.types.Operator):
 
     def execute(self, context):
         bpy.ops.object.mode_set(mode='OBJECT')
+        _return_to_preview_after_edit(context)
         ws = context.workspace
-        if ws and ws.get("studio_profile") == "edit":       # in the studioEdit tab: return to Studio
+        if ws and ws.get("studio_profile") == "edit":       # legacy studioEdit tab: return to Studio
             studio = bpy.data.workspaces.get("Studio")
             if studio:
                 context.window.workspace = studio
@@ -1517,7 +1637,6 @@ SHORTCUTS = {
     'O': ("add", "ELLIPSE"),
     'T': ("add", "TEXT"),
     'P': ("pen", ""),
-    'C': ("tool", "builtin.annotate"),
     'CTRL G': ("op", "group"),
     'CTRL SHIFT G': ("op", "ungroup"),
 }
@@ -1800,6 +1919,11 @@ def _topbar_draw_left(self, context):
     if bpy.data.is_dirty:
         name += " •"
     layout.label(text=name)
+    if is_general(context):
+        layout.separator(factor=1.5)
+        row = layout.row(align=True)
+        row.operator("ed.undo", text="", icon='LOOP_BACK')
+        row.operator("ed.redo", text="", icon='LOOP_FORWARDS')
 
 
 def _topbar_draw_right(self, context):
@@ -2015,17 +2139,39 @@ import os
 from bpy.app.handlers import persistent
 
 TEMPLATE = os.path.join(os.path.dirname(__file__), "studio_workspaces.blend")
-STUDIO_WORKSPACES = ("Lumber", "Studio", "studioEdit")
+STUDIO_WORKSPACES = ("Lumber", "Studio")       # the tabs every file gets
+LEGACY_WORKSPACES = ("studioEdit",)            # older tabs still recognised as studio tabs
+
+
+def _retire_legacy_workspaces():
+    """Remove the old studioEdit tab: editing now happens inside Studio.
+
+    Only removes the tab this extension created (it carries studio_profile "edit")
+    and only when no window is showing it, which is what Blender's own
+    Delete Workspace does after switching windows away.
+    """
+    wm = bpy.context.window_manager
+    showing = {w.workspace for w in wm.windows} if wm else set()
+    doomed = [ws for ws in bpy.data.workspaces
+              if ws.name in LEGACY_WORKSPACES and ws.get("studio_profile") == "edit"
+              and ws not in showing]
+    if doomed and len(bpy.data.workspaces) > len(doomed):
+        try:
+            bpy.data.batch_remove(ids=doomed)
+        except Exception as e:
+            print(f"Lumber Studio: could not retire the studioEdit tab: {e}")
 
 
 def _ensure_workspaces():
     wm = bpy.context.window_manager
     if wm is None or not wm.windows:
         return 0.5                      # UI not ready yet: try again shortly
+    _retire_legacy_workspaces()
     if not os.path.exists(TEMPLATE):
         return None
     missing = [n for n in STUDIO_WORKSPACES if n not in bpy.data.workspaces]
     if not missing:
+        _apply_owner_filter()
         return None
     win = wm.windows[0]
     prev = win.workspace.name
@@ -2040,9 +2186,51 @@ def _ensure_workspaces():
         ws = bpy.data.workspaces.get(prev)
         if ws:
             win.workspace = ws
+        _apply_owner_filter()
         return None
     bpy.app.timers.register(_settle, first_interval=0.05)
     return None
+
+
+# ---------------------------------------------------------------------------
+# Add-on filter: in Studio, only the Lumber extensions draw UI. BlenderKit's
+# search bar, tabs and panels (and any other add-on's) are hidden there and
+# still show everywhere else. Uses Blender's own per-workspace add-on filter.
+# ---------------------------------------------------------------------------
+
+def _studio_owner_ids():
+    """Module names of the Lumber extensions that are enabled."""
+    mine = __package__ or __name__
+    prefix = mine.rsplit(".", 1)[0] + "." if "." in mine else ""
+    names = {mine}
+    for addon in bpy.context.preferences.addons:
+        mod = addon.module
+        if mod.startswith(prefix) and mod.rsplit(".", 1)[-1].startswith("lumber"):
+            names.add(mod)
+    return names
+
+
+def _apply_owner_filter():
+    for ws in bpy.data.workspaces:
+        if ws.get("studio_profile") not in ("general", "edit"):
+            continue
+        try:
+            have = {o.name for o in ws.owner_ids}
+            for name in sorted(_studio_owner_ids() - have):
+                ws.owner_ids.new(name)
+            ws.use_filter_by_owner = True
+        except Exception as e:
+            print(f"Lumber Studio: could not set the add-on filter on {ws.name}: {e}")
+
+
+def _clear_owner_filter():
+    """Unregistering: give Studio back every add-on's UI."""
+    for ws in bpy.data.workspaces:
+        if ws.get("studio_profile") in ("general", "edit"):
+            try:
+                ws.use_filter_by_owner = False
+            except Exception:
+                pass
 
 
 # ---------------------------------------------------------------------------
@@ -2056,20 +2244,28 @@ _nav_saved = None          # the user's own "Navigation Controls" preference
 
 
 def _is_studio_ws(ws):
-    return ws is not None and (ws.name in STUDIO_WORKSPACES or ws.get("studio_profile")
-                               or ws.get("lumber_studio"))
+    return ws is not None and (ws.name in STUDIO_WORKSPACES or ws.name in LEGACY_WORKSPACES
+                               or ws.get("studio_profile") or ws.get("lumber_studio"))
 
 
 def _enable_orbit_ball():
     for ws in bpy.data.workspaces:
         if not _is_studio_ws(ws):
             continue
+        general = ws.get("studio_profile") in ("general", "edit")
         for scr in ws.screens:
             for a in scr.areas:
                 if a.type == 'VIEW_3D':
                     sp = a.spaces.active
                     sp.show_gizmo = True
                     sp.show_gizmo_navigate = True
+                    if general:
+                        # The right panel (Properties) already shows Scene / Design / Edit;
+                        # the 3D sidebar only repeated it as a strip of Tool / Item tabs.
+                        sp.show_region_ui = False
+                        # Blender's select-mode and tool-option strip; snapping comes back
+                        # here as Studio's own controls in a later phase.
+                        sp.show_region_tool_header = False
 
 
 def _set_nav_buttons(show):
@@ -2122,6 +2318,8 @@ def _on_load_post(*_args):
 # ---------------------------------------------------------------------------
 
 classes = (
+    LUMBERSTUDIO_OT_button,
+    LUMBERSTUDIO_OT_button_undo,
     LUMBERSTUDIO_GGT_toolbar,
     LUMBERSTUDIO_OT_set_workspace,
     LUMBERSTUDIO_MT_workspaces,
@@ -2207,6 +2405,7 @@ def unregister():
         _set_nav_buttons(_nav_saved)
         _nav_saved = None
     _unregister_keymap()
+    _clear_owner_filter()
     _unpatch_sidebar()
     _unpatch_outliner()
     _unpatch_topbar()
