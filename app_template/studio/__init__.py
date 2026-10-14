@@ -75,10 +75,22 @@ def _restore_settings():
     prefs.is_dirty = was_dirty
 
 
+@bpy.app.handlers.persistent
+def _on_load_post(*_args):
+    # Opening another Studio file reloads Studio's preferences without running
+    # register() again; make sure Studio's extensions are still on.
+    if bpy.context.preferences.app_template == "studio":
+        _enable_extensions()
+
+
 def register():
     _apply_settings()
     _enable_extensions()
+    if _on_load_post not in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.append(_on_load_post)
 
 
 def unregister():
+    if _on_load_post in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.remove(_on_load_post)
     _restore_settings()

@@ -32,6 +32,9 @@ import bpy  # noqa: E402  (after the environment is set)
 sys.path.insert(0, REPO)
 import lumber_studio as ls  # noqa: E402
 
+# Must match STUDIO_EXTENSIONS + CARRY_OVER_EXTENSIONS in app_template/studio/__init__.py
+STUDIO_TEMPLATE_EXTENSIONS = ("lumber_studio", "lumber_supports", "mcp")
+
 # The starting scene, taken from the look approved in Studio (all lengths in mm).
 START = {
     "cube_size": 100.0,
@@ -54,8 +57,15 @@ def build_userpref():
     _rna_xml.xml_file_run(bpy.context, THEME_XML, presets.preset_xml_map)
     prefs = bpy.context.preferences
     prefs.themes[0].filepath = ""
-    # The extensions themselves are turned on by the template's __init__.py,
-    # which finds them wherever they are installed.
+    # List Studio's extensions (and the Blender connection) as enabled. Every time a
+    # Studio file opens, Blender reloads these preferences and turns off anything
+    # not listed, which would cut the connection and switch Studio's tools off.
+    # Listed extensions that aren't installed are simply skipped.
+    have = {a.module for a in prefs.addons}
+    for short in STUDIO_TEMPLATE_EXTENSIONS:
+        name = "bl_ext.user_default." + short
+        if name not in have:
+            prefs.addons.new().module = name
     bpy.ops.wm.save_userpref()
     src = os.path.join(_config, "userpref.blend")
     dst = os.path.join(TEMPLATE_DIR, "userpref.blend")
