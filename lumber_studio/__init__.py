@@ -62,6 +62,14 @@ def is_editing(context):
     return studio_profile(context) in {"edit_mesh", "edit_curve"}
 
 
+STUDIO_APP_TEMPLATE = "studio"
+
+
+def in_studio_app():
+    """True when Blender is running the Studio application template (File > New > Studio)."""
+    return getattr(bpy.context.preferences, "app_template", "") == STUDIO_APP_TEMPLATE
+
+
 def lumber_available():
     return hasattr(bpy.types, "LUMBER_OT_add_board") or "lumber.add_board" in dir(bpy.ops.lumber)
 
@@ -450,7 +458,12 @@ class LUMBERSTUDIO_MT_workspaces(bpy.types.Menu):
     def draw(self, context):
         layout = self.layout
         current = context.window.workspace
+        studio_app = in_studio_app()
         for ws in bpy.data.workspaces:
+            if ws.name in LEGACY_WORKSPACES and ws != current:
+                continue                # the retired studioEdit tab
+            if studio_app and not _is_studio_ws(ws):
+                continue                # in the Studio template, only Studio's own tabs
             row = layout.row()
             op = row.operator("lumberstudio.set_workspace", text=ws.name,
                               icon='CHECKMARK' if ws == current else 'BLANK1')
@@ -465,8 +478,13 @@ class LUMBERSTUDIO_MT_main(bpy.types.Menu):
         layout = self.layout
         layout.operator_context = 'INVOKE_DEFAULT'
 
-        op = layout.operator("lumberstudio.set_workspace", text="Exit to Full Blender")
-        op.name = "Layout"
+        if in_studio_app():
+            # Leave the Studio template: stock Blender with your own theme and settings
+            op = layout.operator("wm.read_homefile", text="Exit to Full Blender")
+            op.app_template = ""
+        else:
+            op = layout.operator("lumberstudio.set_workspace", text="Exit to Full Blender")
+            op.name = "Layout"
         layout.menu("LUMBERSTUDIO_MT_workspaces")
         layout.separator()
 
@@ -779,11 +797,27 @@ class LUMBERSTUDIO_OT_print_setup(bpy.types.Operator):
         return {'FINISHED'}
 
 
+def _open_on_studio_tab():
+    """A new Studio file starts on the Studio tab, whatever tab the startup file was saved on."""
+    if bpy.data.filepath:
+        return
+    studio = bpy.data.workspaces.get("Studio")
+    wm = bpy.context.window_manager
+    if studio is None or wm is None:
+        return
+    for win in wm.windows:
+        if not _is_studio_ws(win.workspace):
+            win.workspace = studio
+
+
 def _new_file_setup():
     """New, untitled files start ready to print: millimetres, framed on the plate."""
     wm = bpy.context.window_manager
     if wm is None or not wm.windows:
         return 0.5
+    if not in_studio_app():
+        return None                             # only Studio's own new files; stock Blender files stay as they are
+    _open_on_studio_tab()
     scene = bpy.context.scene
     if bpy.data.filepath or _is_mm_scene(scene) or not getattr(scene, "lumberstudio_print_sizes", False):
         return None
@@ -2143,30 +2177,15 @@ STUDIO_WORKSPACES = ("Lumber", "Studio")       # the tabs every file gets
 LEGACY_WORKSPACES = ("studioEdit",)            # older tabs still recognised as studio tabs
 
 
-def _retire_legacy_workspaces():
-    """Remove the old studioEdit tab: editing now happens inside Studio.
-
-    Only removes the tab this extension created (it carries studio_profile "edit")
-    and only when no window is showing it, which is what Blender's own
-    Delete Workspace does after switching windows away.
-    """
-    wm = bpy.context.window_manager
-    showing = {w.workspace for w in wm.windows} if wm else set()
-    doomed = [ws for ws in bpy.data.workspaces
-              if ws.name in LEGACY_WORKSPACES and ws.get("studio_profile") == "edit"
-              and ws not in showing]
-    if doomed and len(bpy.data.workspaces) > len(doomed):
-        try:
-            bpy.data.batch_remove(ids=doomed)
-        except Exception as e:
-            print(f"Lumber Studio: could not retire the studioEdit tab: {e}")
+# The old studioEdit tab is no longer added to files. Files that already have it
+# keep it (deleting workspaces from a script isn't safe in Blender: removing the
+# data directly leaves broken screens behind), but Studio's menu no longer lists it.
 
 
 def _ensure_workspaces():
     wm = bpy.context.window_manager
     if wm is None or not wm.windows:
         return 0.5                      # UI not ready yet: try again shortly
-    _retire_legacy_workspaces()
     if not os.path.exists(TEMPLATE):
         return None
     missing = [n for n in STUDIO_WORKSPACES if n not in bpy.data.workspaces]
@@ -2235,12 +2254,13 @@ def _clear_owner_filter():
 
 # ---------------------------------------------------------------------------
 # Orbit navigator: Blender's axis ball (drag to orbit, click an axis to snap
-# to the X / Y / Z view). In studio tabs we show only the ball and hide the
-# zoom / pan / camera / ortho buttons under it; they come back elsewhere.
+# to the X / Y / Z view) is kept on in studio tabs. The zoom / pan / camera
+# buttons under it are a global preference, so the extension never touches it:
+# the Studio application template hides them while it's active and puts your
+# own setting back when you leave.
 # ---------------------------------------------------------------------------
 
 _nav_owner = object()
-_nav_saved = None          # the user's own "Navigation Controls" preference
 
 
 def _is_studio_ws(ws):
@@ -2257,41 +2277,29 @@ def _enable_orbit_ball():
             for a in scr.areas:
                 if a.type == 'VIEW_3D':
                     sp = a.spaces.active
-                    sp.show_gizmo = True
-                    sp.show_gizmo_navigate = True
+                    # Only write what differs: this runs on every tab switch
+                    if not sp.show_gizmo:
+                        sp.show_gizmo = True
+                    if not sp.show_gizmo_navigate:
+                        sp.show_gizmo_navigate = True
                     if general:
                         # The right panel (Properties) already shows Scene / Design / Edit;
                         # the 3D sidebar only repeated it as a strip of Tool / Item tabs.
-                        sp.show_region_ui = False
+                        if sp.show_region_ui:
+                            sp.show_region_ui = False
                         # Blender's select-mode and tool-option strip; snapping comes back
                         # here as Studio's own controls in a later phase.
-                        sp.show_region_tool_header = False
-
-
-def _set_nav_buttons(show):
-    prefs = bpy.context.preferences
-    v = prefs.view
-    if v.show_navigate_ui != show:
-        dirty = prefs.is_dirty
-        v.show_navigate_ui = show
-        prefs.is_dirty = dirty          # don't make Blender save this into your prefs
+                        if sp.show_region_tool_header:
+                            sp.show_region_tool_header = False
 
 
 def _sync_nav(*_args):
-    global _nav_saved
     win = bpy.context.window or (bpy.context.window_manager.windows[0]
                                  if bpy.context.window_manager and bpy.context.window_manager.windows else None)
     if win is None:
         return
-    v = bpy.context.preferences.view
     if _is_studio_ws(win.workspace):
-        if _nav_saved is None:
-            _nav_saved = v.show_navigate_ui
         _enable_orbit_ball()
-        _set_nav_buttons(False)
-    elif _nav_saved is not None:
-        _set_nav_buttons(_nav_saved)
-        _nav_saved = None
 
 
 def _subscribe_nav():
@@ -2400,10 +2408,6 @@ def unregister():
     if bpy.app.timers.is_registered(_new_file_setup):
         bpy.app.timers.unregister(_new_file_setup)
     bpy.msgbus.clear_by_owner(_nav_owner)
-    global _nav_saved
-    if _nav_saved is not None:
-        _set_nav_buttons(_nav_saved)
-        _nav_saved = None
     _unregister_keymap()
     _clear_owner_filter()
     _unpatch_sidebar()

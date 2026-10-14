@@ -43,11 +43,8 @@ names = [w.name for w in bpy.data.workspaces]
 print("workspaces now:", names)
 studio = bpy.data.workspaces.get("Studio")
 check(studio is not None and studio.get("studio_profile") == "general", "Studio has profile general")
-check("studioEdit" in names, "template still carries studioEdit (to be retired)")
-
-ls._retire_legacy_workspaces()
-check("studioEdit" not in [w.name for w in bpy.data.workspaces], "studioEdit retired")
-check("Studio" in [w.name for w in bpy.data.workspaces], "Studio kept")
+check(ls.STUDIO_WORKSPACES == ("Lumber", "Studio"), "studioEdit is no longer added to files")
+check(not hasattr(ls, "_retire_legacy_workspaces"), "no scripted workspace deletion (it crashes Blender)")
 
 ls._apply_owner_filter()
 check(studio.use_filter_by_owner, "Studio add-on filter on")
