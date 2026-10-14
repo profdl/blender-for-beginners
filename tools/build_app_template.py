@@ -10,7 +10,8 @@ or with Blender itself:
 
 Writes:
     app_template/studio/userpref.blend   Studio's own preferences: theme (app_template/studio_theme.xml)
-    app_template/studio/startup.blend    Studio's starting file: Studio + Lumber tabs, millimetres, 20 mm cube
+    app_template/studio/startup.blend    Studio's starting file: Studio + Lumber tabs, millimetres,
+                                         a rounded 100 mm cube in Preview on a white stage
 """
 
 import os
@@ -30,6 +31,20 @@ import bpy  # noqa: E402  (after the environment is set)
 
 sys.path.insert(0, REPO)
 import lumber_studio as ls  # noqa: E402
+
+# The starting scene, taken from the look approved in Studio (all lengths in mm).
+START = {
+    "cube_size": 100.0,
+    "corner_radius": 0.5,
+    "corner_smoothness": 8,
+    "cube_color": (0.8, 0.1355, 0.592, 1.0),          # pink
+    "cube_roughness": 0.5,
+    "stage_color": (0.9755, 0.9755, 1.0),             # near-white backdrop
+    # The Studio view: close in, turned so the cube's shadow falls toward the viewer
+    "view_location": (-5.717, 3.737, 47.564),
+    "view_rotation": (0.76881, 0.47429, -0.22521, -0.36506),   # quaternion w, x, y, z
+    "view_distance": 270.5,
+}
 
 
 def build_userpref():
@@ -73,15 +88,39 @@ def build_startup():
             ob = bpy.data.objects.get(name)
             if ob is not None:
                 bpy.data.objects.remove(ob)
-        cube = bpy.data.objects.get("Cube")
-        if cube is not None:
-            s = ls._mm(scene, scene.lumberstudio_new_size)
-            cube.data.transform(mathutils.Matrix.Scale(s / 2.0, 4))   # factory cube is 2 units wide
-            cube.location = (0.0, 0.0, s / 2)
-            if not cube.data.materials:
-                cube.data.materials.append(ls._default_material())
+        cube = bpy.data.objects["Cube"]
+        s = ls._mm(scene, START["cube_size"])
+        cube.data.transform(mathutils.Matrix.Scale(s / 2.0, 4))   # factory cube is 2 units wide
+        cube.location = (0.0, 0.0, s / 2)
+        corners = cube.modifiers.new(ls.CORNERS_MOD, 'BEVEL')
+        corners.width = ls._mm(scene, START["corner_radius"])
+        corners.segments = START["corner_smoothness"]
+        corners.limit_method = 'ANGLE'
+        mat = bpy.data.materials.new("Cube")
+        if hasattr(mat, "use_nodes") and not mat.use_nodes:
+            mat.use_nodes = True
+        bsdf = ls._principled(mat)
+        bsdf.inputs["Base Color"].default_value = START["cube_color"]
+        bsdf.inputs["Roughness"].default_value = START["cube_roughness"]
+        cube.data.materials.clear()
+        cube.data.materials.append(mat)
+        for ob in scene.objects:
+            ob.select_set(ob == cube)
+        bpy.context.view_layer.objects.active = cube
+
         ls._apply_owner_filter()
-        ls._frame_plate(scene)
+        ls._frame_plate(scene)            # every studio view on the plate (the Lumber tab keeps this)
+
+        bpy.context.view_layer.update()   # so the floor fits the cube's new size, not the old one
+        # Studio opens in Preview: lit by the sun on a stage that fades into the backdrop
+        scene.lumberstudio_stage_color = START["stage_color"]
+        scene["lumberstudio_preview_floor"] = 1          # set without running the update (no window here)
+        space = next(a.spaces.active for scr in studio.screens for a in scr.areas if a.type == 'VIEW_3D')
+        ls._apply_preview(space, True, True)
+        r3 = space.region_3d
+        r3.view_location = START["view_location"]
+        r3.view_rotation = START["view_rotation"]
+        r3.view_distance = START["view_distance"]
         dst = os.path.join(TEMPLATE_DIR, "startup.blend")
         # No thumbnail: drawing one needs a screen, which a background build doesn't have
         bpy.context.preferences.filepaths.file_preview_type = 'NONE'

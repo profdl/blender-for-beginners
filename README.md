@@ -50,6 +50,7 @@ python3 -I tools/build_app_template.py .
 ```
 python3 -I tests/test_phase1.py .
 python3 -I tests/test_app_template.py .
+python3 -I tests/test_preview_sun.py .
 ```
 
 `test_app_template.py` installs the template and extension into throwaway

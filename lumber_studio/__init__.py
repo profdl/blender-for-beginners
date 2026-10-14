@@ -1220,11 +1220,16 @@ class LUMBERSTUDIO_PT_scene(_StudioPanel, bpy.types.Panel):
             split.label(text="Color")
             split.prop(scene if stage else sh, "lumberstudio_stage_color" if stage else "background_color", text="")
 
-            col = _section(layout, "Lighting")
-            col.row().prop(sh, "light", expand=True)
-            col.prop(sh, "show_shadows", text="Shadows")
-            col.prop(sh, "show_cavity", text="Soft Edges")
-            col.prop(sh, "show_specular_highlight", text="Highlights")
+            sun = _preview_sun()
+            if stage and sun is not None:
+                # In Preview the sun does the lighting (the solid-view options below don't apply)
+                _draw_sun_controls(layout, scene, sun)
+            else:
+                col = _section(layout, "Lighting")
+                col.row().prop(sh, "light", expand=True)
+                col.prop(sh, "show_shadows", text="Shadows")
+                col.prop(sh, "show_cavity", text="Soft Edges")
+                col.prop(sh, "show_specular_highlight", text="Highlights")
 
             col = _section(layout, "Canvas")
             previewing = sh.type == 'MATERIAL'
@@ -1290,6 +1295,12 @@ class LUMBERSTUDIO_PT_design(_StudioPanel, bpy.types.Panel):
     def draw(self, context):
         layout = self.layout
         obj = context.object
+
+        if _is_preview_sun(obj):
+            # The Preview sun only has a direction, not a place: show sun controls, not Position/Rotation
+            layout.label(text="Sun", icon='LIGHT_SUN')
+            _draw_sun_controls(layout, context.scene, obj, heading=False)
+            return
 
         row = layout.row()
         row.prop(obj, "name", text="", icon='OBJECT_DATA')
@@ -1830,7 +1841,93 @@ def _set_stage_color(color):
         bg.inputs["Strength"].default_value = 1.0
     w.color = color
     diff = _floor_material().node_tree.nodes["Stage Diffuse"]
-    diff.inputs["Color"].default_value = (*[c / (c + _SUN_ON_FLOOR) for c in color], 1.0)
+    sun = _sun_on_floor()
+    diff.inputs["Color"].default_value = (*[c / (c + s) if c + s > 0 else 0.0 for c, s in zip(color, sun)], 1.0)
+
+
+def _sun_on_floor():
+    """Light the sun puts on the floor, per colour channel (follows the sun's height, brightness, colour)."""
+    sun = _preview_sun()
+    if sun is None:
+        return (_SUN_ON_FLOOR,) * 3
+    e = max(sun.data.energy * math.cos(sun.rotation_euler.x), 0.0) / math.pi
+    return tuple(e * c for c in sun.data.color)
+
+
+def _preview_sun():
+    ob = bpy.data.objects.get(_SUN_OB)
+    return ob if ob is not None and ob.type == 'LIGHT' else None
+
+
+def _is_preview_sun(ob):
+    return ob is not None and ob.name == _SUN_OB and ob.type == 'LIGHT' and bool(ob.get("studio_helper"))
+
+
+def _refresh_stage(scene):
+    """Keep the floor blending into the backdrop after the sun changes."""
+    if bpy.data.materials.get(_FLOOR_MAT) is not None:
+        _set_stage_color(tuple(scene.lumberstudio_stage_color))
+
+
+# Sun controls, in plain terms: how high it is, which way it shines from, colour,
+# brightness. They read and write the Preview sun directly.
+
+def _sun_height_get(self):
+    sun = _preview_sun()
+    return math.pi / 2 - (sun.rotation_euler.x if sun else _SUN_TILT)
+
+
+def _sun_height_set(self, value):
+    sun = _preview_sun()
+    if sun:
+        sun.rotation_euler.x = math.pi / 2 - value
+        _refresh_stage(self)
+
+
+def _sun_direction_get(self):
+    sun = _preview_sun()
+    return (sun.rotation_euler.z if sun else 0.0) % (2 * math.pi)
+
+
+def _sun_direction_set(self, value):
+    sun = _preview_sun()
+    if sun:
+        sun.rotation_euler.z = value
+
+
+def _sun_brightness_get(self):
+    sun = _preview_sun()
+    return sun.data.energy if sun else _SUN_STRENGTH
+
+
+def _sun_brightness_set(self, value):
+    sun = _preview_sun()
+    if sun:
+        sun.data.energy = value
+        _refresh_stage(self)
+
+
+def _sun_color_get(self):
+    sun = _preview_sun()
+    return tuple(sun.data.color) if sun else (1.0, 1.0, 1.0)
+
+
+def _sun_color_set(self, value):
+    sun = _preview_sun()
+    if sun:
+        sun.data.color = value
+        _refresh_stage(self)
+
+
+def _draw_sun_controls(layout, scene, sun, heading=True):
+    col = _section(layout, "Sun") if heading else layout.column()
+    col.prop(scene, "lumberstudio_sun_height", text="Height")
+    col.prop(scene, "lumberstudio_sun_direction", text="Direction")
+    split = col.split(factor=0.3)
+    split.label(text="Color")
+    split.prop(scene, "lumberstudio_sun_color", text="")
+    col.prop(scene, "lumberstudio_sun_brightness", text="Brightness", slider=True)
+    col.prop(sun.data, "angle", text="Shadow Softness")
 
 
 def _preview_rig(scene):
@@ -1856,9 +1953,11 @@ def _preview_rig(scene):
         sun = bpy.data.objects.new(_SUN_OB, bpy.data.lights.new(_SUN_OB, 'SUN'))
         col.objects.link(sun)
         _tag_helper(sun)
-    sun.data.energy = _SUN_STRENGTH
-    sun.data.angle = math.radians(12)        # soft-edged shadow
-    sun.rotation_euler = (_SUN_TILT, 0.0, math.radians(30))
+        # Starting values only: after this the sun is the student's to adjust
+        sun.data.energy = _SUN_STRENGTH
+        sun.data.angle = math.radians(12)    # soft-edged shadow
+        sun.rotation_euler = (_SUN_TILT, 0.0, math.radians(30))
+    sun.hide_select = False                  # click it in Layers to adjust it
     return col, floor, sun
 
 
@@ -1877,8 +1976,11 @@ def _fit_floor(scene, floor):
     if lo[0] == math.inf:
         lo, hi = [0, 0, 0], [1, 1, 1]
     size = max(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2], 0.1)
-    floor.location = ((lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, lo[2])
-    floor.scale = (size * 200,) * 3          # reaches the horizon
+    loc = ((lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, lo[2])
+    # Only write real changes: this also runs after every edit while previewing
+    if abs(floor.location.z - loc[2]) > 1e-6 or abs(floor.scale.x - size * 200) > 1e-3 * size:
+        floor.location = loc
+        floor.scale = (size * 200,) * 3      # reaches the horizon
 
 
 def _show_preview_floor(context, show):
@@ -2317,6 +2419,21 @@ def _nav_startup():
 
 
 @persistent
+def _on_depsgraph_update(scene, depsgraph):
+    """While previewing, keep the floor under the lowest object as things move or change size."""
+    floor = bpy.data.objects.get(_FLOOR_OB)
+    col = bpy.data.collections.get(_FLOOR_COL)
+    if floor is None or col is None or col.hide_viewport:
+        return
+    for u in depsgraph.updates:
+        ob = u.id
+        if isinstance(ob, bpy.types.Object) and not ob.get("studio_helper") \
+                and (u.is_updated_transform or u.is_updated_geometry):
+            _fit_floor(scene, floor)
+            return
+
+
+@persistent
 def _on_load_post(*_args):
     bpy.app.timers.register(_ensure_workspaces, first_interval=0.1)
     bpy.app.timers.register(_nav_startup, first_interval=0.3)   # msgbus is cleared on file load
@@ -2381,6 +2498,20 @@ def register():
     bpy.types.Scene.lumberstudio_preview_floor = bpy.props.BoolProperty(
         name="Floor in Preview", default=False, update=_on_preview_floor,
         description="Show a floor that catches shadows in Preview")
+    bpy.types.Scene.lumberstudio_sun_height = bpy.props.FloatProperty(
+        name="Sun Height", subtype='ANGLE', min=math.radians(5), max=math.radians(90),
+        get=_sun_height_get, set=_sun_height_set,
+        description="How high the sun is: low makes long shadows, overhead makes short ones")
+    bpy.types.Scene.lumberstudio_sun_direction = bpy.props.FloatProperty(
+        name="Sun Direction", subtype='ANGLE', min=0.0, max=2 * math.pi,
+        get=_sun_direction_get, set=_sun_direction_set,
+        description="Which side the sun shines from, so you can turn the shadow toward the view")
+    bpy.types.Scene.lumberstudio_sun_brightness = bpy.props.FloatProperty(
+        name="Sun Brightness", min=0.0, soft_max=10.0, precision=2,
+        get=_sun_brightness_get, set=_sun_brightness_set, description="How strong the sunlight is")
+    bpy.types.Scene.lumberstudio_sun_color = bpy.props.FloatVectorProperty(
+        name="Sun Color", subtype='COLOR', size=3, min=0.0, max=1.0,
+        get=_sun_color_get, set=_sun_color_set, description="Colour of the sunlight")
     bpy.types.Scene.lumberstudio_stage_color = bpy.props.FloatVectorProperty(
         name="Stage Color", subtype='COLOR', size=3, min=0.0, max=1.0,
         default=(0.80, 0.80, 0.82), update=_on_preview_floor,
@@ -2392,6 +2523,8 @@ def register():
     _register_keymap()
     if _on_load_post not in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.append(_on_load_post)
+    if _on_depsgraph_update not in bpy.app.handlers.depsgraph_update_post:
+        bpy.app.handlers.depsgraph_update_post.append(_on_depsgraph_update)
     bpy.app.timers.register(_ensure_workspaces, first_interval=0.1)   # the file open right now
     bpy.app.timers.register(_nav_startup, first_interval=0.3)
     bpy.app.timers.register(_new_file_setup, first_interval=0.6)
@@ -2401,6 +2534,8 @@ def unregister():
     global _draw_handle
     if _on_load_post in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.remove(_on_load_post)
+    if _on_depsgraph_update in bpy.app.handlers.depsgraph_update_post:
+        bpy.app.handlers.depsgraph_update_post.remove(_on_depsgraph_update)
     if bpy.app.timers.is_registered(_ensure_workspaces):
         bpy.app.timers.unregister(_ensure_workspaces)
     if bpy.app.timers.is_registered(_nav_startup):
@@ -2424,6 +2559,10 @@ def unregister():
             delattr(owner, name)
     if hasattr(bpy.types.Scene, "lumberstudio_preview_floor"):
         del bpy.types.Scene.lumberstudio_preview_floor
+    for name in ("lumberstudio_sun_height", "lumberstudio_sun_direction",
+                 "lumberstudio_sun_brightness", "lumberstudio_sun_color"):
+        if hasattr(bpy.types.Scene, name):
+            delattr(bpy.types.Scene, name)
     if hasattr(bpy.types.Scene, "lumberstudio_stage_color"):
         del bpy.types.Scene.lumberstudio_stage_color
     if hasattr(bpy.types.WindowManager, "lumberstudio_median"):

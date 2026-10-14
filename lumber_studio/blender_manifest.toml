@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "lumber_studio"
-version = "0.9.0"
+version = "0.10.0"
 name = "Lumber Studio"
 tagline = "Spline-style minimal workspaces for Blender"
 maintainer = "Daniel Lefcourt <daniellefcourt@gmail.com>"
